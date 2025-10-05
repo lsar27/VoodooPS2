@@ -1039,12 +1039,25 @@ void ApplePS2SynapticsTouchPad::swapFingers(int dst, int src) {
 
 #define FINGER_DIST 1000000
 
+// Stabilization parameters for 3-finger drag
+static int gSkipFramesOnAdd3 = 2;      // frames to skip reporting after count increases to >=3
+static int gSwapFramesStable = 2;      // consecutive frames over threshold to confirm finger swap
+static int s_skipFramesRemaining = 0;  // runtime counter for skip frames
+static int s_swapConfirmCounter = 0;   // runtime counter for swap confirmation
+
 bool ApplePS2SynapticsTouchPad::renumberFingers() {
     const auto &f0 = fingerStates[0];
     const auto &f1 = fingerStates[1];
     auto &f2 = fingerStates[2];
     auto &f3 = fingerStates[3];
 	auto &f4 = fingerStates[4];
+
+    // Handle skip frames countdown
+    if (s_skipFramesRemaining > 0) {
+        s_skipFramesRemaining--;
+        DEBUG_LOG("synaptics_parse_hw_state: skip frames remaining: %d", s_skipFramesRemaining);
+        return false;
+    }
 
     if (clampedFingerCount == lastFingerCount && clampedFingerCount >= 3) {
         // update imaginary finger states
@@ -1114,12 +1127,17 @@ bool ApplePS2SynapticsTouchPad::renumberFingers() {
         }
     }
     if (clampedFingerCount != lastFingerCount) {
+        // Reset swap confirmation counter when finger count changes
+        s_swapConfirmCounter = 0;
+        
         if (clampedFingerCount > lastFingerCount && clampedFingerCount >= 3) {
-            // Skip sending touch data once because we need to wait for the next extended packet
-            if (wasSkipped)
+            // Skip sending touch data for gSkipFramesOnAdd3 frames to wait for stable extended packets
+            if (wasSkipped) {
                 wasSkipped = false;
+            }
             else {
-                DEBUG_LOG("synaptics_parse_hw_state: Skip sending touch data");
+                s_skipFramesRemaining = gSkipFramesOnAdd3;
+                DEBUG_LOG("synaptics_parse_hw_state: Starting skip frames: %d", s_skipFramesRemaining);
                 wasSkipped = true;
                 return false;
             }
@@ -1227,7 +1245,21 @@ bool ApplePS2SynapticsTouchPad::renumberFingers() {
                 DEBUG_LOG("synaptics_parse_hw_state: adding third finger, maxMinDist=%d", maxMinDist);
                 f2.z = (f0.z + f1.z) / 2;
                 f2.w = (f0.w + f1.w) / 2;
+                
+                // Check if swap condition is met with hysteresis
+                bool shouldSwap = false;
                 if (maxMinDist > FINGER_DIST && maxMinDistIndex >= 0) {
+                    s_swapConfirmCounter++;
+                    DEBUG_LOG("synaptics_parse_hw_state: swap pending, counter=%d/%d", s_swapConfirmCounter, gSwapFramesStable);
+                    if (s_swapConfirmCounter >= gSwapFramesStable) {
+                        shouldSwap = true;
+                        DEBUG_LOG("synaptics_parse_hw_state: swap confirmed");
+                    }
+                } else {
+                    s_swapConfirmCounter = 0;
+                }
+                
+                if (shouldSwap) {
                     // i-th physical finger was replaced, save its old coordinates to the 3rd physical finger and map it to a new virtual finger.
                     // The third physical finger should now be mapped to the old fingerStates[i].virtualFingerIndex.
                     swapFingers(2, maxMinDistIndex);
@@ -1235,12 +1267,34 @@ bool ApplePS2SynapticsTouchPad::renumberFingers() {
                 }
                 else {
                     // existing fingers didn't change or were swapped, so we don't know the location of the third finger
-                    const auto &fj = upperFinger();
-
-                    f2.x = fj.x;
-                    f2.y = fj.y;
+                    // Initialize using centroid of f0 and f1, or extrapolate from previous f2
+                    int vfi2 = f2.virtualFingerIndex;
+                    if (vfi2 >= 0 && vfi2 < SYNAPTICS_MAX_FINGERS && virtualFingerStates[vfi2].touch) {
+                        // Previous f2 exists, extrapolate from f0 and f1 displacement
+                        const auto &f0v = virtualFingerStates[f0.virtualFingerIndex];
+                        const auto &f1v = virtualFingerStates[f1.virtualFingerIndex];
+                        const auto &f2v = virtualFingerStates[vfi2];
+                        
+                        int dvx = ((f0.x - f0v.x_avg.newest()) + (f1.x - f1v.x_avg.newest())) / 2;
+                        int dvy = ((f0.y - f0v.y_avg.newest()) + (f1.y - f1v.y_avg.newest())) / 2;
+                        
+                        // Apply displacement with light EMA smoothing (alpha=0.3)
+                        int new_x = f2v.x_avg.average() + dvx;
+                        int new_y = f2v.y_avg.average() + dvy;
+                        f2.x = (new_x * 3 + f2v.x_avg.average() * 7) / 10;
+                        f2.y = (new_y * 3 + f2v.y_avg.average() * 7) / 10;
+                        
+                        DEBUG_LOG("synaptics_parse_hw_state: extrapolating f2 from previous position");
+                    } else {
+                        // No previous f2, use centroid of f0 and f1
+                        f2.x = (f0.x + f1.x) / 2;
+                        f2.y = (f0.y + f1.y) / 2;
+                        DEBUG_LOG("synaptics_parse_hw_state: initializing f2 at centroid");
+                    }
+                    
+                    clip_no_update_limits(f2.x, logical_min_x, logical_max_x, margin_size_x);
+                    clip_no_update_limits(f2.y, logical_min_y, logical_max_y, margin_size_y);
                     assignVirtualFinger(2);
-                    DEBUG_LOG("synaptics_parse_hw_state: not swapped, taking upper finger position");
                 }
             }
             else if (clampedFingerCount >= 4) {
