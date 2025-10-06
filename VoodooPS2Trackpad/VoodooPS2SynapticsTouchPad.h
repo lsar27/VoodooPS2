@@ -284,6 +284,15 @@ private:
     int agmFingerCount {0};
 	bool wasSkipped {false};
 	int z_finger {45};
+    
+    // 3-finger drag stabilization parameters
+    int skipFramesOnAdd3 {2};       // frames to skip when finger count increases to >=3
+    int swapFramesStable {2};       // consecutive frames required to confirm finger swap
+    int skipFramesRemaining {0};    // runtime counter for skip frames
+    int swapConfirmCounter {0};     // runtime counter for swap confirmation
+    int emaAlphaPct {30};           // EMA smoothing alpha percentage (0-100)
+    int adaptiveThreshold {0};      // adaptive threshold adjustment for close fingers (0=disabled)
+    int adaptiveCloseDist2 {250000}; // distance squared below which adaptive threshold applies
     int zlimit {0};
     int noled {0};
     uint64_t maxaftertyping {500000000};

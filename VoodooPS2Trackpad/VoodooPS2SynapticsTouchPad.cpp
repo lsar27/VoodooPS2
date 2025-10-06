@@ -1046,6 +1046,13 @@ bool ApplePS2SynapticsTouchPad::renumberFingers() {
     auto &f3 = fingerStates[3];
 	auto &f4 = fingerStates[4];
 
+    // Handle skip frames countdown
+    if (skipFramesRemaining > 0) {
+        skipFramesRemaining--;
+        DEBUG_LOG("synaptics_parse_hw_state: skip frames remaining: %d", skipFramesRemaining);
+        return false;
+    }
+
     if (clampedFingerCount == lastFingerCount && clampedFingerCount >= 3) {
         // update imaginary finger states
         if (f0.virtualFingerIndex != -1 && f1.virtualFingerIndex != -1) {
@@ -1114,12 +1121,17 @@ bool ApplePS2SynapticsTouchPad::renumberFingers() {
         }
     }
     if (clampedFingerCount != lastFingerCount) {
+        // Reset swap confirmation counter when finger count changes
+        swapConfirmCounter = 0;
+        
         if (clampedFingerCount > lastFingerCount && clampedFingerCount >= 3) {
-            // Skip sending touch data once because we need to wait for the next extended packet
-            if (wasSkipped)
+            // Skip sending touch data for skipFramesOnAdd3 frames to wait for stable extended packets
+            if (wasSkipped) {
                 wasSkipped = false;
+            }
             else {
-                DEBUG_LOG("synaptics_parse_hw_state: Skip sending touch data");
+                skipFramesRemaining = skipFramesOnAdd3;
+                DEBUG_LOG("synaptics_parse_hw_state: Starting skip frames: %d", skipFramesRemaining);
                 wasSkipped = true;
                 return false;
             }
@@ -1227,7 +1239,34 @@ bool ApplePS2SynapticsTouchPad::renumberFingers() {
                 DEBUG_LOG("synaptics_parse_hw_state: adding third finger, maxMinDist=%d", maxMinDist);
                 f2.z = (f0.z + f1.z) / 2;
                 f2.w = (f0.w + f1.w) / 2;
-                if (maxMinDist > FINGER_DIST && maxMinDistIndex >= 0) {
+                
+                // Check if swap condition is met with hysteresis and adaptive threshold
+                bool shouldSwap = false;
+                int threshold = FINGER_DIST;
+                
+                // Apply adaptive threshold if enabled and fingers are close
+                if (adaptiveThreshold > 0) {
+                    int dx = f0.x - f1.x;
+                    int dy = f0.y - f1.y;
+                    int dist2 = dx * dx + dy * dy;
+                    if (dist2 < adaptiveCloseDist2) {
+                        threshold = FINGER_DIST + adaptiveThreshold;
+                        DEBUG_LOG("synaptics_parse_hw_state: fingers close (dist2=%d), adaptive threshold=%d", dist2, threshold);
+                    }
+                }
+                
+                if (maxMinDist > threshold && maxMinDistIndex >= 0) {
+                    swapConfirmCounter++;
+                    DEBUG_LOG("synaptics_parse_hw_state: swap pending, counter=%d/%d", swapConfirmCounter, swapFramesStable);
+                    if (swapConfirmCounter >= swapFramesStable) {
+                        shouldSwap = true;
+                        DEBUG_LOG("synaptics_parse_hw_state: swap confirmed");
+                    }
+                } else {
+                    swapConfirmCounter = 0;
+                }
+                
+                if (shouldSwap) {
                     // i-th physical finger was replaced, save its old coordinates to the 3rd physical finger and map it to a new virtual finger.
                     // The third physical finger should now be mapped to the old fingerStates[i].virtualFingerIndex.
                     swapFingers(2, maxMinDistIndex);
@@ -1235,12 +1274,36 @@ bool ApplePS2SynapticsTouchPad::renumberFingers() {
                 }
                 else {
                     // existing fingers didn't change or were swapped, so we don't know the location of the third finger
-                    const auto &fj = upperFinger();
-
-                    f2.x = fj.x;
-                    f2.y = fj.y;
+                    // Initialize using centroid of f0 and f1, or extrapolate from previous f2
+                    int vfi2 = f2.virtualFingerIndex;
+                    if (vfi2 >= 0 && vfi2 < SYNAPTICS_MAX_FINGERS && virtualFingerStates[vfi2].touch) {
+                        // Previous f2 exists, extrapolate from f0 and f1 displacement
+                        const auto &f0v = virtualFingerStates[f0.virtualFingerIndex];
+                        const auto &f1v = virtualFingerStates[f1.virtualFingerIndex];
+                        const auto &f2v = virtualFingerStates[vfi2];
+                        
+                        int dvx = ((f0.x - f0v.x_avg.newest()) + (f1.x - f1v.x_avg.newest())) / 2;
+                        int dvy = ((f0.y - f0v.y_avg.newest()) + (f1.y - f1v.y_avg.newest())) / 2;
+                        
+                        // Apply displacement with configurable EMA smoothing
+                        int new_x = f2v.x_avg.average() + dvx;
+                        int new_y = f2v.y_avg.average() + dvy;
+                        int alpha = emaAlphaPct;
+                        int beta = 100 - alpha;
+                        f2.x = (new_x * alpha + f2v.x_avg.average() * beta) / 100;
+                        f2.y = (new_y * alpha + f2v.y_avg.average() * beta) / 100;
+                        
+                        DEBUG_LOG("synaptics_parse_hw_state: extrapolating f2 from previous position");
+                    } else {
+                        // No previous f2, use centroid of f0 and f1
+                        f2.x = (f0.x + f1.x) / 2;
+                        f2.y = (f0.y + f1.y) / 2;
+                        DEBUG_LOG("synaptics_parse_hw_state: initializing f2 at centroid");
+                    }
+                    
+                    clip_no_update_limits(f2.x, logical_min_x, logical_max_x, margin_size_x);
+                    clip_no_update_limits(f2.y, logical_min_y, logical_max_y, margin_size_y);
                     assignVirtualFinger(2);
-                    DEBUG_LOG("synaptics_parse_hw_state: not swapped, taking upper finger position");
                 }
             }
             else if (clampedFingerCount >= 4) {
@@ -1826,6 +1889,11 @@ void ApplePS2SynapticsTouchPad::setPropertiesGated(OSDictionary * config)
         {"ForceTouchCustomDownThreshold",   &_forceTouchCustomDownThreshold}, // used in mode 4
         {"ForceTouchCustomUpThreshold",     &_forceTouchCustomUpThreshold}, // used in mode 4
         {"ForceTouchCustomPower",           &_forceTouchCustomPower}, // used in mode 4
+        {"ThreeFingerDragSkipFrames",       &skipFramesOnAdd3}, // frames to skip when adding 3rd finger
+        {"ThreeFingerDragSwapFrames",       &swapFramesStable}, // frames required to confirm finger swap
+        {"ThreeFingerEmaAlphaPct",          &emaAlphaPct}, // EMA smoothing alpha percentage (0-100)
+        {"ThreeFingerAdaptiveThreshold",    &adaptiveThreshold}, // adaptive threshold adjustment (0=disabled)
+        {"ThreeFingerAdaptiveCloseDist2",   &adaptiveCloseDist2}, // distance squared for adaptive threshold
 	};
 	const struct {const char *name; int *var;} boolvars[]={
         {"DisableLEDUpdate",                &noled},
