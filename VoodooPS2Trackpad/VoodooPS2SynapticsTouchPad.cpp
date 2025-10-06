@@ -1039,12 +1039,6 @@ void ApplePS2SynapticsTouchPad::swapFingers(int dst, int src) {
 
 #define FINGER_DIST 1000000
 
-// Stabilization parameters for 3-finger drag
-static int gSkipFramesOnAdd3 = 2;      // frames to skip reporting after count increases to >=3
-static int gSwapFramesStable = 2;      // consecutive frames over threshold to confirm finger swap
-static int s_skipFramesRemaining = 0;  // runtime counter for skip frames
-static int s_swapConfirmCounter = 0;   // runtime counter for swap confirmation
-
 bool ApplePS2SynapticsTouchPad::renumberFingers() {
     const auto &f0 = fingerStates[0];
     const auto &f1 = fingerStates[1];
@@ -1053,9 +1047,9 @@ bool ApplePS2SynapticsTouchPad::renumberFingers() {
 	auto &f4 = fingerStates[4];
 
     // Handle skip frames countdown
-    if (s_skipFramesRemaining > 0) {
-        s_skipFramesRemaining--;
-        DEBUG_LOG("synaptics_parse_hw_state: skip frames remaining: %d", s_skipFramesRemaining);
+    if (skipFramesRemaining > 0) {
+        skipFramesRemaining--;
+        DEBUG_LOG("synaptics_parse_hw_state: skip frames remaining: %d", skipFramesRemaining);
         return false;
     }
 
@@ -1128,16 +1122,16 @@ bool ApplePS2SynapticsTouchPad::renumberFingers() {
     }
     if (clampedFingerCount != lastFingerCount) {
         // Reset swap confirmation counter when finger count changes
-        s_swapConfirmCounter = 0;
+        swapConfirmCounter = 0;
         
         if (clampedFingerCount > lastFingerCount && clampedFingerCount >= 3) {
-            // Skip sending touch data for gSkipFramesOnAdd3 frames to wait for stable extended packets
+            // Skip sending touch data for skipFramesOnAdd3 frames to wait for stable extended packets
             if (wasSkipped) {
                 wasSkipped = false;
             }
             else {
-                s_skipFramesRemaining = gSkipFramesOnAdd3;
-                DEBUG_LOG("synaptics_parse_hw_state: Starting skip frames: %d", s_skipFramesRemaining);
+                skipFramesRemaining = skipFramesOnAdd3;
+                DEBUG_LOG("synaptics_parse_hw_state: Starting skip frames: %d", skipFramesRemaining);
                 wasSkipped = true;
                 return false;
             }
@@ -1249,14 +1243,14 @@ bool ApplePS2SynapticsTouchPad::renumberFingers() {
                 // Check if swap condition is met with hysteresis
                 bool shouldSwap = false;
                 if (maxMinDist > FINGER_DIST && maxMinDistIndex >= 0) {
-                    s_swapConfirmCounter++;
-                    DEBUG_LOG("synaptics_parse_hw_state: swap pending, counter=%d/%d", s_swapConfirmCounter, gSwapFramesStable);
-                    if (s_swapConfirmCounter >= gSwapFramesStable) {
+                    swapConfirmCounter++;
+                    DEBUG_LOG("synaptics_parse_hw_state: swap pending, counter=%d/%d", swapConfirmCounter, swapFramesStable);
+                    if (swapConfirmCounter >= swapFramesStable) {
                         shouldSwap = true;
                         DEBUG_LOG("synaptics_parse_hw_state: swap confirmed");
                     }
                 } else {
-                    s_swapConfirmCounter = 0;
+                    swapConfirmCounter = 0;
                 }
                 
                 if (shouldSwap) {
@@ -1880,6 +1874,8 @@ void ApplePS2SynapticsTouchPad::setPropertiesGated(OSDictionary * config)
         {"ForceTouchCustomDownThreshold",   &_forceTouchCustomDownThreshold}, // used in mode 4
         {"ForceTouchCustomUpThreshold",     &_forceTouchCustomUpThreshold}, // used in mode 4
         {"ForceTouchCustomPower",           &_forceTouchCustomPower}, // used in mode 4
+        {"ThreeFingerDragSkipFrames",       &skipFramesOnAdd3}, // frames to skip when adding 3rd finger
+        {"ThreeFingerDragSwapFrames",       &swapFramesStable}, // frames required to confirm finger swap
 	};
 	const struct {const char *name; int *var;} boolvars[]={
         {"DisableLEDUpdate",                &noled},

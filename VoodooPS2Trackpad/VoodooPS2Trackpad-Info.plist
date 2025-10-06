@@ -324,6 +324,10 @@
 					<integer>500000000</integer>
 					<key>SkipPassThrough</key>
 					<false/>
+					<key>ThreeFingerDragSkipFrames</key>
+					<integer>2</integer>
+					<key>ThreeFingerDragSwapFrames</key>
+					<integer>2</integer>
 					<key>USBMouseStopsTrackpad</key>
 					<integer>0</integer>
 					<key>WakeDelay</key>
