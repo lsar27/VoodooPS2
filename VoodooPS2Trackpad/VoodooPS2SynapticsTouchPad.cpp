@@ -1240,9 +1240,22 @@ bool ApplePS2SynapticsTouchPad::renumberFingers() {
                 f2.z = (f0.z + f1.z) / 2;
                 f2.w = (f0.w + f1.w) / 2;
                 
-                // Check if swap condition is met with hysteresis
+                // Check if swap condition is met with hysteresis and adaptive threshold
                 bool shouldSwap = false;
-                if (maxMinDist > FINGER_DIST && maxMinDistIndex >= 0) {
+                int threshold = FINGER_DIST;
+                
+                // Apply adaptive threshold if enabled and fingers are close
+                if (adaptiveThreshold > 0) {
+                    int dx = f0.x - f1.x;
+                    int dy = f0.y - f1.y;
+                    int dist2 = dx * dx + dy * dy;
+                    if (dist2 < adaptiveCloseDist2) {
+                        threshold = FINGER_DIST + adaptiveThreshold;
+                        DEBUG_LOG("synaptics_parse_hw_state: fingers close (dist2=%d), adaptive threshold=%d", dist2, threshold);
+                    }
+                }
+                
+                if (maxMinDist > threshold && maxMinDistIndex >= 0) {
                     swapConfirmCounter++;
                     DEBUG_LOG("synaptics_parse_hw_state: swap pending, counter=%d/%d", swapConfirmCounter, swapFramesStable);
                     if (swapConfirmCounter >= swapFramesStable) {
@@ -1272,11 +1285,13 @@ bool ApplePS2SynapticsTouchPad::renumberFingers() {
                         int dvx = ((f0.x - f0v.x_avg.newest()) + (f1.x - f1v.x_avg.newest())) / 2;
                         int dvy = ((f0.y - f0v.y_avg.newest()) + (f1.y - f1v.y_avg.newest())) / 2;
                         
-                        // Apply displacement with light EMA smoothing (alpha=0.3)
+                        // Apply displacement with configurable EMA smoothing
                         int new_x = f2v.x_avg.average() + dvx;
                         int new_y = f2v.y_avg.average() + dvy;
-                        f2.x = (new_x * 3 + f2v.x_avg.average() * 7) / 10;
-                        f2.y = (new_y * 3 + f2v.y_avg.average() * 7) / 10;
+                        int alpha = emaAlphaPct;
+                        int beta = 100 - alpha;
+                        f2.x = (new_x * alpha + f2v.x_avg.average() * beta) / 100;
+                        f2.y = (new_y * alpha + f2v.y_avg.average() * beta) / 100;
                         
                         DEBUG_LOG("synaptics_parse_hw_state: extrapolating f2 from previous position");
                     } else {
@@ -1876,6 +1891,9 @@ void ApplePS2SynapticsTouchPad::setPropertiesGated(OSDictionary * config)
         {"ForceTouchCustomPower",           &_forceTouchCustomPower}, // used in mode 4
         {"ThreeFingerDragSkipFrames",       &skipFramesOnAdd3}, // frames to skip when adding 3rd finger
         {"ThreeFingerDragSwapFrames",       &swapFramesStable}, // frames required to confirm finger swap
+        {"ThreeFingerEmaAlphaPct",          &emaAlphaPct}, // EMA smoothing alpha percentage (0-100)
+        {"ThreeFingerAdaptiveThreshold",    &adaptiveThreshold}, // adaptive threshold adjustment (0=disabled)
+        {"ThreeFingerAdaptiveCloseDist2",   &adaptiveCloseDist2}, // distance squared for adaptive threshold
 	};
 	const struct {const char *name; int *var;} boolvars[]={
         {"DisableLEDUpdate",                &noled},
